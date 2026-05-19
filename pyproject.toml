@@ -1,0 +1,38 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "repoeval"
+version = "0.1.0"
+description = "Repo-local eval harness for routing AI coding agents by task type, cost, latency, and correctness."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "Nick" }]
+dependencies = [
+  "typer>=0.12",
+  "pydantic>=2.7",
+  "rich>=13.7",
+  "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "ruff>=0.5",
+]
+
+[project.scripts]
+repoeval = "repoeval.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/repoeval"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
