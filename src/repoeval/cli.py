@@ -13,8 +13,7 @@ def init(path: Path = typer.Option(Path("."), help="Repository root")) -> None:
     cfg.mkdir(parents=True, exist_ok=True)
     tasks = cfg / "tasks.yaml"
     if not tasks.exists():
-        tasks.write_text("tasks: []
-", encoding="utf-8")
+        tasks.write_text("tasks: []\n", encoding="utf-8")
     typer.echo(f"Initialized {cfg}")
 
 
