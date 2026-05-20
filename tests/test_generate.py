@@ -19,6 +19,12 @@ def commit_file(repo, relative_path, content, message):
     return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
 
 
+def commit_all(repo, message):
+    run(["git", "add", "-A"], cwd=repo)
+    run(["git", "commit", "-m", message], cwd=repo)
+    return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+
+
 @pytest.fixture
 def git_repo(tmp_path):
     run(["git", "init"], cwd=tmp_path)
@@ -59,6 +65,22 @@ def test_generate_from_git_history_builds_deterministic_eval_tasks(git_repo):
     assert task.source.commit == second
     assert task.source.parent_commit is not None
     assert task.source.changed_files == ["src/app.py"]
+
+
+def test_generate_from_git_history_keeps_deleted_files_out_of_expected_files(git_repo):
+    commit_file(git_repo, "src/obsolete.py", "def old():\n    return 1\n", "Initial module")
+    (git_repo / "src" / "obsolete.py").unlink()
+    deleted_commit = commit_all(git_repo, "Delete obsolete module")
+
+    tasks = generate_from_git_history(git_repo, limit=1)
+
+    assert len(tasks) == 1
+    task = tasks[0]
+    assert task.source is not None
+    assert task.source.type == "git-history"
+    assert task.source.commit == deleted_commit
+    assert task.source.changed_files == ["src/obsolete.py"]
+    assert task.expected_files == []
 
 
 def test_generate_from_git_history_gracefully_handles_no_commits(tmp_path):

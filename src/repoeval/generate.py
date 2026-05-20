@@ -37,6 +37,24 @@ def _target_file_hashes(repo_root: Path, commit: str, paths: list[str]) -> dict[
     return hashes
 
 
+def _paths_existing_in_commit(repo_root: Path, commit: str, paths: list[str]) -> list[str]:
+    existing_paths: list[str] = []
+    for path in paths:
+        exists = (
+            subprocess.run(
+                ["git", "cat-file", "-e", f"{commit}:{path}"],
+                cwd=repo_root,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            ).returncode
+            == 0
+        )
+        if exists:
+            existing_paths.append(path)
+    return existing_paths
+
+
 def _exists_in_parent(repo_root: Path, commit: str, path: str) -> bool:
     completed = subprocess.run(
         ["git", "rev-parse", f"{commit}^"],
@@ -72,6 +90,7 @@ def generate_from_git_history(
         changed_files = [path for path in commit.changed_files if not _is_ignored(path)]
         if not changed_files:
             continue
+        expected_files = _paths_existing_in_commit(repo_root, commit.commit, changed_files)
         slug = _slugify(commit.subject)
         short_sha = commit.commit[:8]
         body = f"\n\nCommit body:\n{commit.body}" if commit.body else ""
@@ -88,7 +107,7 @@ def generate_from_git_history(
                 prompt=prompt,
                 task_type=category or "git-history",
                 verify_commands=["pytest"],
-                expected_files=changed_files,
+                expected_files=expected_files,
                 source=TaskSource(
                     type="git-history",
                     commit=commit.commit,

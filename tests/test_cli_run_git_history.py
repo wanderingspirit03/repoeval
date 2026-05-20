@@ -30,6 +30,12 @@ def _commit_file(repo: Path, relative: str, content: str, message: str) -> str:
     return _git(repo, "rev-parse", "HEAD")
 
 
+def _commit_all(repo: Path, message: str) -> str:
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", message)
+    return _git(repo, "rev-parse", "HEAD")
+
+
 def _make_repo_with_history(repo: Path) -> tuple[str, str]:
     _git(repo, "init")
     _git(repo, "config", "user.email", "repoeval@example.invalid")
@@ -151,3 +157,86 @@ def test_run_manual_task_preserves_existing_head_behavior(tmp_path: Path, monkey
     assert result["status"] == "passed"
     assert result["expected_files"] == [{"path": "src/example.py", "exists": True}]
     assert result["diff"]["changed_lines"] == 0
+
+
+def test_run_generated_git_history_deletion_passes_when_target_deletion_is_reproduced(
+    tmp_path: Path, monkeypatch
+) -> None:  # noqa: ANN001
+    _git(tmp_path, "init")
+    _git(tmp_path, "config", "user.email", "repoeval@example.invalid")
+    _git(tmp_path, "config", "user.name", "RepoEval Test")
+    _commit_file(tmp_path, "src/deleted.py", "def removed():\n    return 1\n", "Initial module")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_dummy.py").write_text("def test_dummy():\n    assert True\n", encoding="utf-8")
+    _commit_all(tmp_path, "Add tests")
+    (tmp_path / "src" / "deleted.py").unlink()
+    target = _commit_all(tmp_path, "Delete obsolete module")
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+
+    init_result = runner.invoke(app, ["init"])
+    assert init_result.exit_code == 0, init_result.output
+    generate_result = runner.invoke(app, ["generate", "--from-git-history", "--limit", "1"])
+    assert generate_result.exit_code == 0, generate_result.output
+    tasks_path = tmp_path / ".repoeval" / "tasks.yaml"
+    task_payload = yaml.safe_load(tasks_path.read_text(encoding="utf-8"))
+    task = task_payload["tasks"][0]
+    assert task["source"]["commit"] == target
+    assert task["expected_files"] == []
+    assert task["source"]["changed_files"] == ["src/deleted.py"]
+    task["verify_commands"] = ["rm src/deleted.py"]
+    tasks_path.write_text(yaml.safe_dump(task_payload, sort_keys=False), encoding="utf-8")
+
+    results_path = tmp_path / ".repoeval" / "results.jsonl"
+    run_result = runner.invoke(app, ["run", "--agents", "mock", "--tasks", str(tasks_path)])
+
+    assert run_result.exit_code == 0, run_result.output
+    result = json.loads(results_path.read_text(encoding="utf-8").strip())
+    assert result["status"] == "passed"
+    assert result["expected_files"] == []
+    assert result["diff"]["files_touched"] == ["src/deleted.py"]
+    assert result["diff"]["files_deleted"] == 1
+    assert result["verify"][-1]["command"].startswith("git-history target content matches ")
+    assert result["verify"][-1]["passed"] is True
+
+    report_result = runner.invoke(app, ["report", "--results", str(results_path)])
+    assert report_result.exit_code == 0, report_result.output
+    report_text = (tmp_path / ".repoeval" / "report.md").read_text(encoding="utf-8")
+    routing_payload = yaml.safe_load((tmp_path / ".repoeval" / "routing.yaml").read_text(encoding="utf-8"))
+    assert "| mock | 1/1 | 100.0% |" in report_text
+    assert routing_payload["routes"]["git-history"]["recommended_runner"] == "mock"
+    assert routing_payload["routes"]["git-history"]["pass_rate"] == 1.0
+
+
+def test_run_generated_git_history_deletion_fails_when_parent_file_is_unchanged(
+    tmp_path: Path, monkeypatch
+) -> None:  # noqa: ANN001
+    _git(tmp_path, "init")
+    _git(tmp_path, "config", "user.email", "repoeval@example.invalid")
+    _git(tmp_path, "config", "user.name", "RepoEval Test")
+    _commit_file(tmp_path, "src/deleted.py", "def removed():\n    return 1\n", "Initial module")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_dummy.py").write_text("def test_dummy():\n    assert True\n", encoding="utf-8")
+    _commit_all(tmp_path, "Add tests")
+    (tmp_path / "src" / "deleted.py").unlink()
+    _commit_all(tmp_path, "Delete obsolete module")
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+
+    init_result = runner.invoke(app, ["init"])
+    assert init_result.exit_code == 0, init_result.output
+    generate_result = runner.invoke(app, ["generate", "--from-git-history", "--limit", "1"])
+    assert generate_result.exit_code == 0, generate_result.output
+
+    results_path = tmp_path / ".repoeval" / "results.jsonl"
+    run_result = runner.invoke(app, ["run", "--agents", "mock", "--tasks", ".repoeval/tasks.yaml"])
+
+    assert run_result.exit_code == 0, run_result.output
+    result = json.loads(results_path.read_text(encoding="utf-8").strip())
+    assert result["status"] == "failed"
+    assert result["expected_files"] == []
+    assert "src/deleted.py" not in result["diff"]["files_touched"]
+    assert result["diff"]["files_deleted"] == 0
+    assert result["verify"][-1]["passed"] is False
+    verify_stderr = Path(result["verify"][-1]["stderr_path"]).read_text(encoding="utf-8")
+    assert "expected target commit to delete src/deleted.py" in verify_stderr
