@@ -197,20 +197,27 @@ def _run_verify_command(command: str, cwd: Path, log_dir: Path, index: int) -> V
     return VerifyResult(**result.model_dump(), passed=result.exit_code == 0)
 
 
-def _git_history_target_verify(task: EvalTask, cwd: Path, log_dir: Path, index: int) -> VerifyResult | None:
+def _git_history_target_verify(
+    task: EvalTask,
+    cwd: Path,
+    log_dir: Path,
+    index: int,
+    source_repo: Path | None = None,
+) -> VerifyResult | None:
     if not task.source or task.source.type != "git-history" or not task.source.commit:
         return None
     changed_files = task.source.changed_files or task.expected_files
     if not changed_files:
         return None
 
+    history_repo = source_repo or cwd
     paths_to_compare = []
     for path in changed_files:
         existed_in_parent = (
             task.source.parent_commit is not None
             and subprocess.run(
                 ["git", "cat-file", "-e", f"{task.source.parent_commit}:{path}"],
-                cwd=cwd,
+                cwd=history_repo,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 check=False,
@@ -232,7 +239,7 @@ def _git_history_target_verify(task: EvalTask, cwd: Path, log_dir: Path, index: 
     for path in paths_to_compare:
         completed = subprocess.run(
             ["git", "show", f"{task.source.commit}:{path}"],
-            cwd=cwd,
+            cwd=history_repo,
             capture_output=True,
             check=False,
         )
@@ -343,7 +350,11 @@ def run(
                     for idx, command in enumerate(verify_commands, start=1)
                 ]
                 target_verify = _git_history_target_verify(
-                    task, isolated.path, isolated.log_dir, len(verify_results) + 1
+                    task,
+                    isolated.path,
+                    isolated.log_dir,
+                    len(verify_results) + 1,
+                    repo_root,
                 )
                 if target_verify is not None:
                     verify_results.append(target_verify)

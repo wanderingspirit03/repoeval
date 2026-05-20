@@ -66,6 +66,18 @@ def test_mock_runner_workflow_end_to_end(tmp_path: Path, monkeypatch) -> None:  
 def test_git_history_modified_file_requires_recreating_target_content(
     tmp_path: Path, monkeypatch
 ) -> None:  # noqa: ANN001
+    assert_modified_git_history_stale_content_fails(tmp_path, monkeypatch, isolation_mode="worktree")
+
+
+def test_git_history_modified_file_requires_recreating_target_content_in_temp_copy(
+    tmp_path: Path, monkeypatch
+) -> None:  # noqa: ANN001
+    assert_modified_git_history_stale_content_fails(tmp_path, monkeypatch, isolation_mode="temp-copy")
+
+
+def assert_modified_git_history_stale_content_fails(
+    tmp_path: Path, monkeypatch, *, isolation_mode: str
+) -> None:  # noqa: ANN001
     subprocess.run(["git", "init"], cwd=tmp_path, check=True)
     subprocess.run(["git", "config", "user.email", "repoeval@example.invalid"], cwd=tmp_path, check=True)
     subprocess.run(["git", "config", "user.name", "RepoEval Test"], cwd=tmp_path, check=True)
@@ -82,6 +94,10 @@ def test_git_history_modified_file_requires_recreating_target_content(
 
     init_result = runner.invoke(app, ["init", "--force"])
     assert init_result.exit_code == 0, init_result.output
+    config_path = tmp_path / ".repoeval" / "config.yaml"
+    config_payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config_payload["isolation"]["mode"] = isolation_mode
+    config_path.write_text(yaml.safe_dump(config_payload, sort_keys=False), encoding="utf-8")
     generate_result = runner.invoke(app, ["generate", "--from-git-history", "--limit", "1"])
     assert generate_result.exit_code == 0, generate_result.output
 
@@ -95,6 +111,8 @@ def test_git_history_modified_file_requires_recreating_target_content(
 
     rec = json.loads(results_path.read_text(encoding="utf-8"))
     assert rec["status"] == "failed"
+    assert rec["verify"][-1]["command"].startswith("git-history target content matches")
+    assert rec["verify"][-1]["passed"] is False
     assert rec["diff"]["files_touched"] == []
     assert rec["diff"]["changed_lines"] == 0
     assert rec["expected_files"] == [{"path": "src/example.py", "exists": True}]
