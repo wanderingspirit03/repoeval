@@ -7,7 +7,14 @@ from repoeval.isolation import create_isolated_repo
 
 
 def _git(repo: Path, *args: str) -> None:
-    subprocess.run(["git", *args], cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
 
 
 def _make_repo(repo: Path) -> None:
@@ -25,6 +32,31 @@ def _make_repo(repo: Path) -> None:
     _git(repo, "commit", "-m", "initial")
 
 
+def _make_repo_with_second_commit(repo: Path) -> tuple[str, str]:
+    _make_repo(repo)
+    parent = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    ).stdout.strip()
+    (repo / "tracked.txt").write_text("changed\n", encoding="utf-8")
+    (repo / "added.txt").write_text("added\n", encoding="utf-8")
+    _git(repo, "add", "tracked.txt", "added.txt")
+    _git(repo, "commit", "-m", "second")
+    child = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    ).stdout.strip()
+    return parent, child
+
+
 def test_temp_copy_isolation_copies_tracked_files_and_excludes_run_artifacts(tmp_path):
     repo = tmp_path / "repo"
     _make_repo(repo)
@@ -37,7 +69,11 @@ def test_temp_copy_isolation_copies_tracked_files_and_excludes_run_artifacts(tmp
         assert isolated.path.exists()
         assert isolated.log_dir.exists()
         assert (isolated.path / "tracked.txt").read_text(encoding="utf-8") == "tracked\n"
-        assert not (isolated.path / ".git").exists()
+        assert (isolated.path / ".git").exists()
+        assert (
+            subprocess.run(["git", "diff", "--quiet"], cwd=isolated.path, check=False).returncode
+            == 0
+        )
         assert not (isolated.path / "untracked.txt").exists()
         assert not (isolated.path / ".repoeval" / "results" / "old.jsonl").exists()
         assert not (isolated.path / ".repoeval" / "runs" / "old.log").exists()
@@ -64,3 +100,60 @@ def test_isolation_starts_clean_for_each_runner_task_combination(tmp_path):
         assert (second.path / "tracked.txt").exists()
     finally:
         second.cleanup()
+
+
+def test_temp_copy_can_start_from_specific_parent_commit(tmp_path):
+    repo = tmp_path / "repo"
+    parent, child = _make_repo_with_second_commit(repo)
+    runs_dir = tmp_path / "runs"
+
+    isolated = create_isolated_repo(
+        repo, runs_dir, "task-1", "mock", mode="temp-copy", checkout_ref=parent
+    )
+
+    try:
+        assert (isolated.path / "tracked.txt").read_text(encoding="utf-8") == "tracked\n"
+        assert not (isolated.path / "added.txt").exists()
+        (isolated.path / "added.txt").write_text("added\n", encoding="utf-8")
+        untracked = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard"],
+            cwd=isolated.path,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        ).stdout
+        assert untracked == "added.txt\n"
+    finally:
+        isolated.cleanup()
+
+    assert child
+
+
+def test_worktree_can_start_from_specific_parent_commit(tmp_path):
+    repo = tmp_path / "repo"
+    parent, child = _make_repo_with_second_commit(repo)
+    runs_dir = tmp_path / "runs"
+
+    isolated = create_isolated_repo(
+        repo, runs_dir, "task-1", "mock", mode="worktree", checkout_ref=parent
+    )
+
+    try:
+        assert (isolated.path / "tracked.txt").read_text(encoding="utf-8") == "tracked\n"
+        assert not (isolated.path / "added.txt").exists()
+        assert (
+            subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=isolated.path,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            ).stdout.strip()
+            == parent
+        )
+    finally:
+        isolated.cleanup()
+
+    assert child

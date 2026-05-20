@@ -40,6 +40,7 @@ def create_isolated_repo(
     task_id: str,
     runner_name: str,
     mode: Literal["worktree", "temp-copy"],
+    checkout_ref: str = "HEAD",
 ) -> IsolatedRepo:
     repo_root = repo_root.resolve()
     runs_dir = runs_dir.resolve()
@@ -54,7 +55,7 @@ def create_isolated_repo(
 
     if mode == "worktree":
         subprocess.run(
-            ["git", "worktree", "add", "--detach", str(repo_path), "HEAD"],
+            ["git", "worktree", "add", "--detach", str(repo_path), checkout_ref],
             cwd=repo_root,
             check=True,
             stdout=subprocess.PIPE,
@@ -64,7 +65,7 @@ def create_isolated_repo(
         return IsolatedRepo(path=repo_path, log_dir=log_dir, _worktree=True)
 
     if mode == "temp-copy":
-        _copy_tracked_files(repo_root, repo_path)
+        _copy_tracked_files(repo_root, repo_path, checkout_ref=checkout_ref)
         return IsolatedRepo(path=repo_path, log_dir=log_dir)
 
     raise ValueError(f"Unsupported isolation mode: {mode}")
@@ -74,10 +75,10 @@ def _safe_name(value: str) -> str:
     return "".join(char if char.isalnum() or char in "_.-" else "-" for char in value)
 
 
-def _copy_tracked_files(repo_root: Path, destination: Path) -> None:
+def _copy_tracked_files(repo_root: Path, destination: Path, checkout_ref: str) -> None:
     destination.mkdir(parents=True, exist_ok=True)
     completed = subprocess.run(
-        ["git", "ls-files"],
+        ["git", "ls-tree", "-r", "--name-only", checkout_ref],
         cwd=repo_root,
         check=True,
         stdout=subprocess.PIPE,
@@ -85,19 +86,71 @@ def _copy_tracked_files(repo_root: Path, destination: Path) -> None:
         text=True,
     )
     for relative in completed.stdout.splitlines():
-        source = repo_root / relative
-        if not source.is_file() or _excluded(Path(relative)):
+        path = Path(relative)
+        if _excluded(path):
             continue
-        target = destination / relative
+        target = destination / path
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, target)
+        blob = subprocess.run(
+            ["git", "show", f"{checkout_ref}:{relative}"],
+            cwd=repo_root,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        target.write_bytes(blob.stdout)
+
+    subprocess.run(
+        ["git", "init"],
+        cwd=destination,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "add", "."],
+        cwd=destination,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.email=repoeval@example.invalid",
+            "-c",
+            "user.name=RepoEval",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "baseline",
+        ],
+        cwd=destination,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
 
 
 def _excluded(path: Path) -> bool:
     parts = path.parts
     if not parts:
         return False
-    if parts[0] in {".git", ".pytest_cache", ".ruff_cache", ".mypy_cache", ".venv", "venv", "build", "dist", "__pycache__"}:
+    if parts[0] in {
+        ".git",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".mypy_cache",
+        ".venv",
+        "venv",
+        "build",
+        "dist",
+        "__pycache__",
+    }:
         return True
     if len(parts) >= 3 and parts[0] == ".repoeval" and parts[1] in {"results", "runs"}:
         return True

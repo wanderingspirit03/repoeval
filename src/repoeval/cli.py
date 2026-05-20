@@ -12,7 +12,14 @@ import typer
 from repoeval.fixtures import FixtureError, load_config, load_tasks, write_config, write_tasks
 from repoeval.generate import generate_from_git_history
 from repoeval.isolation import create_isolated_repo
-from repoeval.models import CommandResult, EvalTask, ExpectedFileResult, RepoEvalConfig, RunnerResult, VerifyResult
+from repoeval.models import (
+    CommandResult,
+    EvalTask,
+    ExpectedFileResult,
+    RepoEvalConfig,
+    RunnerResult,
+    VerifyResult,
+)
 from repoeval.report import summarize_results, write_report
 from repoeval.routing import build_routing, write_routing
 from repoeval.runners import build_runner
@@ -95,7 +102,10 @@ def tasks_list(
     if output_format == "json":
         typer.echo(
             json.dumps(
-                [task.model_dump(mode="json", by_alias=True, exclude_none=True) for task in loaded_tasks],
+                [
+                    task.model_dump(mode="json", by_alias=True, exclude_none=True)
+                    for task in loaded_tasks
+                ],
                 indent=2,
             )
         )
@@ -127,7 +137,9 @@ def generate(
         typer.echo("No generator selected. Use --from-git-history.", err=True)
         raise typer.Exit(1)
 
-    generated_tasks = generate_from_git_history(Path.cwd(), limit=limit, since=since, category=category)
+    generated_tasks = generate_from_git_history(
+        Path.cwd(), limit=limit, since=since, category=category
+    )
     existing_tasks: list[EvalTask] = []
     if output.exists():
         try:
@@ -146,6 +158,12 @@ def generate(
 
 def _resolve_repo_path(path: Path, base: Path) -> Path:
     return path if path.is_absolute() else (base / path).resolve()
+
+
+def _checkout_ref_for_task(task: EvalTask) -> str:
+    if task.source and task.source.type == "git-history" and task.source.parent_commit:
+        return task.source.parent_commit
+    return "HEAD"
 
 
 def _run_command(command: str, cwd: Path, log_dir: Path, phase: str, index: int) -> CommandResult:
@@ -198,7 +216,9 @@ def run(
     agents: str = typer.Option("mock", "--agents", help="Comma-separated runner names"),
     tasks: Path = typer.Option(Path(".repoeval/tasks.yaml"), "--tasks", help="Task fixture path"),
     config: Path = typer.Option(Path(".repoeval/config.yaml"), "--config", help="Config path"),
-    results: Path = typer.Option(Path(".repoeval/results.jsonl"), "--results", help="Results JSONL path"),
+    results: Path = typer.Option(
+        Path(".repoeval/results.jsonl"), "--results", help="Results JSONL path"
+    ),
 ) -> None:
     """Run eval tasks with configured agents and append JSONL results."""
     try:
@@ -230,10 +250,20 @@ def run(
             expected_files: list[ExpectedFileResult] = []
             error: str | None = None
 
-            isolated = create_isolated_repo(repo_root, runs_dir, task.id, agent_name, cfg.isolation.mode)
+            isolated = create_isolated_repo(
+                repo_root,
+                runs_dir,
+                task.id,
+                agent_name,
+                cfg.isolation.mode,
+                checkout_ref=_checkout_ref_for_task(task),
+            )
             try:
                 commands = [*cfg.default_setup_commands, *task.setup_commands]
-                setup_results = [_run_command(command, isolated.path, isolated.log_dir, "setup", idx) for idx, command in enumerate(commands, start=1)]
+                setup_results = [
+                    _run_command(command, isolated.path, isolated.log_dir, "setup", idx)
+                    for idx, command in enumerate(commands, start=1)
+                ]
                 runner_result = runner.run(task, isolated.path, isolated.log_dir / "runner.out")
                 verify_commands = task.verify_commands or cfg.default_verify_commands
                 if agent_name == "mock" and not (isolated.path / "tests").exists():
@@ -243,7 +273,9 @@ def run(
                     for idx, command in enumerate(verify_commands, start=1)
                 ]
                 expected_files = [
-                    ExpectedFileResult(path=expected_file, exists=(isolated.path / expected_file).exists())
+                    ExpectedFileResult(
+                        path=expected_file, exists=(isolated.path / expected_file).exists()
+                    )
                     for expected_file in task.expected_files
                 ]
                 diff = collect_diff_stats(isolated.path)
