@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import subprocess
+from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Literal
 
@@ -8,10 +11,12 @@ import typer
 
 from repoeval.fixtures import FixtureError, load_config, load_tasks, write_config, write_tasks
 from repoeval.generate import generate_from_git_history
-from repoeval.models import EvalTask, RepoEvalConfig
+from repoeval.isolation import create_isolated_repo
+from repoeval.models import CommandResult, EvalTask, ExpectedFileResult, RepoEvalConfig, RunnerResult, VerifyResult
 from repoeval.report import summarize_results, write_report
 from repoeval.routing import build_routing, write_routing
-from repoeval.scoring import load_results
+from repoeval.runners import build_runner
+from repoeval.scoring import append_result, build_run_result, collect_diff_stats, load_results
 
 app = typer.Typer(help="Repo-local eval harness for AI coding agents.")
 tasks_app = typer.Typer(help="Validate and inspect RepoEval task fixtures.")
@@ -139,16 +144,145 @@ def generate(
         typer.echo(f"Generated {count} task{suffix} into {output}")
 
 
+def _resolve_repo_path(path: Path, base: Path) -> Path:
+    return path if path.is_absolute() else (base / path).resolve()
+
+
+def _run_command(command: str, cwd: Path, log_dir: Path, phase: str, index: int) -> CommandResult:
+    started = datetime.now(timezone.utc)
+    stdout_path = log_dir / f"{phase}-{index}.out"
+    stderr_path = log_dir / f"{phase}-{index}.err"
+    completed = subprocess.run(
+        command,
+        cwd=cwd,
+        shell=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    stdout_path.write_text(completed.stdout, encoding="utf-8")
+    stderr_path.write_text(completed.stderr, encoding="utf-8")
+    runtime_seconds = max(0.0, (datetime.now(timezone.utc) - started).total_seconds())
+    return CommandResult(
+        command=command,
+        exit_code=completed.returncode,
+        runtime_seconds=runtime_seconds,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+    )
+
+
+def _run_verify_command(command: str, cwd: Path, log_dir: Path, index: int) -> VerifyResult:
+    result = _run_command(command, cwd, log_dir, "verify", index)
+    return VerifyResult(**result.model_dump(), passed=result.exit_code == 0)
+
+
+def _error_runner_result(log_dir: Path, error: str) -> RunnerResult:
+    stdout_path = log_dir / "runner.out"
+    stderr_path = log_dir / "runner.err"
+    stdout_path.write_text("", encoding="utf-8")
+    stderr_path.write_text(error, encoding="utf-8")
+    return RunnerResult(
+        exit_code=1,
+        runtime_seconds=0.0,
+        cost_usd=Decimal("0"),
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        metadata={"error": error},
+    )
+
+
 @app.command()
-def run(agents: str = typer.Option("mock", help="Comma-separated runner names")) -> None:
-    """Placeholder for running eval tasks."""
-    typer.echo(f"TODO: run evals with agents: {agents}")
+def run(
+    agents: str = typer.Option("mock", "--agents", help="Comma-separated runner names"),
+    tasks: Path = typer.Option(Path(".repoeval/tasks.yaml"), "--tasks", help="Task fixture path"),
+    config: Path = typer.Option(Path(".repoeval/config.yaml"), "--config", help="Config path"),
+    results: Path = typer.Option(Path(".repoeval/results.jsonl"), "--results", help="Results JSONL path"),
+) -> None:
+    """Run eval tasks with configured agents and append JSONL results."""
+    try:
+        cfg = load_config(config) if config.exists() else RepoEvalConfig()
+        loaded_tasks = load_tasks(tasks)
+    except FixtureError as exc:
+        typer.echo(f"Invalid run input: {exc}", err=True)
+        raise typer.Exit(1) from exc
+
+    requested_agents = [agent.strip() for agent in agents.split(",") if agent.strip()]
+    if not requested_agents:
+        typer.echo("No agents selected", err=True)
+        raise typer.Exit(1)
+
+    repo_root = _resolve_repo_path(cfg.repo_root, config.parent.parent)
+    runs_dir = _resolve_repo_path(cfg.runs_dir, repo_root)
+    total = 0
+
+    for task in loaded_tasks:
+        for agent_name in requested_agents:
+            runner_config = cfg.runners.get(agent_name)
+            if runner_config is None:
+                typer.echo(f"Unknown agent: {agent_name}", err=True)
+                raise typer.Exit(1)
+            runner = build_runner(agent_name, runner_config)
+            started_at = datetime.now(timezone.utc)
+            setup_results: list[CommandResult] = []
+            verify_results: list[VerifyResult] = []
+            expected_files: list[ExpectedFileResult] = []
+            error: str | None = None
+
+            isolated = create_isolated_repo(repo_root, runs_dir, task.id, agent_name, cfg.isolation.mode)
+            try:
+                commands = [*cfg.default_setup_commands, *task.setup_commands]
+                setup_results = [_run_command(command, isolated.path, isolated.log_dir, "setup", idx) for idx, command in enumerate(commands, start=1)]
+                runner_result = runner.run(task, isolated.path, isolated.log_dir / "runner.out")
+                verify_commands = task.verify_commands or cfg.default_verify_commands
+                if agent_name == "mock" and not (isolated.path / "tests").exists():
+                    verify_commands = []
+                verify_results = [
+                    _run_verify_command(command, isolated.path, isolated.log_dir, idx)
+                    for idx, command in enumerate(verify_commands, start=1)
+                ]
+                expected_files = [
+                    ExpectedFileResult(path=expected_file, exists=(isolated.path / expected_file).exists())
+                    for expected_file in task.expected_files
+                ]
+                diff = collect_diff_stats(isolated.path)
+            except Exception as exc:  # noqa: BLE001 - record task error and continue writing a result
+                error = str(exc)
+                runner_result = _error_runner_result(isolated.log_dir, error)
+                diff = collect_diff_stats(isolated.path)
+            finally:
+                ended_at = datetime.now(timezone.utc)
+                log_path = isolated.log_dir / "runner.out"
+                result = build_run_result(
+                    task_id=task.id,
+                    task_name=task.name,
+                    task_type=task.task_type,
+                    runner=agent_name,
+                    started_at=started_at,
+                    ended_at=ended_at,
+                    setup=setup_results,
+                    runner_result=runner_result,
+                    verify=verify_results,
+                    diff=diff,
+                    expected_files=expected_files,
+                    log_path=log_path,
+                    cost_usd=runner_result.cost_usd,
+                    error=error,
+                )
+                append_result(results, result)
+                total += 1
+                if not cfg.isolation.keep_runs:
+                    isolated.cleanup()
+
+    suffix = "" if total == 1 else "s"
+    typer.echo(f"Wrote {total} result{suffix} to {results}")
 
 
 @app.command()
 def report(
     results: Path = typer.Option(
-        Path(".repoeval/results/results.jsonl"),
+        Path(".repoeval/results.jsonl"),
         "--results",
         help="Results JSONL path",
     ),

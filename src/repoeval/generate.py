@@ -47,6 +47,7 @@ def generate_from_git_history(
                 prompt=prompt,
                 task_type=category or "git-history",
                 verify_commands=["pytest"],
+                expected_files=changed_files,
                 source=TaskSource(
                     type="git-history",
                     commit=commit.commit,

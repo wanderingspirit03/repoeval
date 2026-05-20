@@ -54,6 +54,7 @@ def test_generate_from_git_history_builds_deterministic_eval_tasks(git_repo):
     assert "src/app.py" in task.prompt
     assert task.task_type == "feature"
     assert task.verify_commands == ["pytest"]
+    assert task.expected_files == ["src/app.py"]
     assert task.source.type == "git-history"
     assert task.source.commit == second
     assert task.source.parent_commit is not None

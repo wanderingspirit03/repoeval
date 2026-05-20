@@ -2,27 +2,131 @@
 
 RepoEval is an open-source CLI for answering one practical question:
 
-> Which AI coding agent/model should I use for **this repo** and **this task type**?
+> Which AI coding agent/model should I use for this repo and this task type?
 
-It creates repo-local eval tasks, runs competing agents in isolated git worktrees, scores outputs with tests/lint/cost/latency/diff metrics, and emits a routing recommendation.
+It creates repo-local eval tasks, runs competing agents in isolated git worktrees or temp copies, scores outputs with tests/lint/cost/latency/diff metrics, and emits a routing recommendation.
 
-## Target MVP
+## Quickstart
+
+Install the package with development tools:
+
+```bash
+pip install -e '.[dev]'
+```
+
+Create repo-local configuration and an empty task fixture:
 
 ```bash
 repoeval init
-repoeval generate --from-git-history --limit 10
-repoeval run --agents claude-code,codex,gemini-flash
+```
+
+This writes:
+
+```text
+.repoeval/config.yaml
+.repoeval/tasks.yaml
+```
+
+Generate tasks from recent git history, inspect them, run the deterministic mock runner, and write reports:
+
+```bash
+repoeval generate --from-git-history --limit 5
+repoeval tasks validate --tasks .repoeval/tasks.yaml
+repoeval tasks list --tasks .repoeval/tasks.yaml
+repoeval run --agents mock --tasks .repoeval/tasks.yaml
 repoeval report
 ```
 
-## MVP acceptance criteria
+The MVP writes these artifacts by default:
 
-- Generates at least 5 eval tasks from git history or explicit YAML fixtures.
-- Runs each task in isolated git worktrees with clean setup/teardown.
-- Supports at least one real runner (`codex exec`) and one deterministic mock runner for tests.
-- Scores pass/fail via configured commands, runtime, diff size, files touched, and optional cost metadata.
-- Produces `report.md`, `results.jsonl`, and `routing.yaml`.
-- Has a test suite covering core planning/scoring/reporting behavior.
+```text
+.repoeval/results.jsonl
+.repoeval/report.md
+.repoeval/routing.yaml
+.repoeval/runs/
+```
+
+## Example output
+
+A successful mock run looks like:
+
+```text
+$ repoeval run --agents mock --tasks .repoeval/tasks.yaml
+Wrote 5 results to .repoeval/results.jsonl
+
+$ repoeval report
+Wrote .repoeval/report.md and .repoeval/routing.yaml
+```
+
+Example `report.md` excerpt:
+
+```markdown
+# RepoEval Report
+
+Total runs: 5
+
+## By Runner
+
+| Runner | Passed | Pass Rate | Avg Runtime (s) | Avg Changed Lines |
+| --- | ---: | ---: | ---: | ---: |
+| mock | 5/5 | 100.0% | 1.25 | 3.0 |
+```
+
+Example `routing.yaml` excerpt:
+
+```yaml
+recommendations:
+- task_type: feature
+  recommended_runner: mock
+  pass_rate: 1.0
+```
+
+## Task fixtures
+
+Tasks live in `.repoeval/tasks.yaml`:
+
+```yaml
+tasks:
+- id: add-example
+  name: Add example implementation
+  prompt: Implement the behavior described by this historical change.
+  category: feature
+  setup_commands: []
+  verify_commands:
+  - pytest
+  expected_files:
+  - src/example.py
+```
+
+Use `repoeval tasks validate` before a run to catch malformed YAML, duplicate ids, invalid paths, or unknown fields.
+
+## Runners
+
+The MVP includes:
+
+- `mock`: deterministic test runner that writes expected files and never calls an external model.
+- `codex`: shell wrapper for `codex exec` configured in `.repoeval/config.yaml` for real agent trials.
+
+Start with `mock` for smoke tests. Add real runners only after the task fixture and verification commands are stable.
+
+## Kill criteria
+
+Stop or discard a run if any of these are true:
+
+- `repoeval tasks validate` fails.
+- The repo cannot be installed or prepared by the configured setup commands.
+- Verification commands are flaky or require undeclared services/secrets.
+- A runner modifies files outside the isolated run directory.
+- The generated tasks do not represent realistic repo work.
+- `report.md` has too few samples to support routing decisions for a task type.
+
+## Roadmap
+
+- Add first-class runner adapters for Claude Code, Gemini, and other coding agents.
+- Add richer scoring weights for correctness, cost, latency, diff size, and reviewer preference.
+- Support repeated trials and confidence intervals per task type.
+- Add fixture curation tools for editing, tagging, and deduplicating generated tasks.
+- Publish CI templates for scheduled eval runs and routing drift detection.
 
 ## Development
 
@@ -31,4 +135,5 @@ python -m venv .venv
 . .venv/bin/activate
 pip install -e '.[dev]'
 pytest
+ruff check .
 ```
