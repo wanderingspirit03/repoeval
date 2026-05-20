@@ -55,6 +55,7 @@ class TaskSource(BaseModel):
     commit: str | None = None
     parent_commit: str | None = None
     changed_files: list[str] = Field(default_factory=list)
+    target_file_hashes: dict[str, str] = Field(default_factory=dict)
     url: str | None = None
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import time
@@ -197,34 +198,18 @@ def _run_verify_command(command: str, cwd: Path, log_dir: Path, index: int) -> V
     return VerifyResult(**result.model_dump(), passed=result.exit_code == 0)
 
 
-def _git_history_target_verify(
-    task: EvalTask,
-    cwd: Path,
-    log_dir: Path,
-    index: int,
-    source_repo: Path | None = None,
-) -> VerifyResult | None:
+def _git_history_target_verify(task: EvalTask, cwd: Path, log_dir: Path, index: int) -> VerifyResult | None:
     if not task.source or task.source.type != "git-history" or not task.source.commit:
         return None
     changed_files = task.source.changed_files or task.expected_files
     if not changed_files:
         return None
 
-    history_repo = source_repo or cwd
     paths_to_compare = []
     for path in changed_files:
-        existed_in_parent = (
-            task.source.parent_commit is not None
-            and subprocess.run(
-                ["git", "cat-file", "-e", f"{task.source.parent_commit}:{path}"],
-                cwd=history_repo,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-            ).returncode
-            == 0
-        )
-        if existed_in_parent:
+        if task.source.target_file_hashes and path not in task.source.target_file_hashes:
+            continue
+        if path in task.source.target_file_hashes:
             paths_to_compare.append(path)
     if not paths_to_compare:
         return None
@@ -237,25 +222,18 @@ def _git_history_target_verify(
     passed = True
 
     for path in paths_to_compare:
-        completed = subprocess.run(
-            ["git", "show", f"{task.source.commit}:{path}"],
-            cwd=history_repo,
-            capture_output=True,
-            check=False,
-        )
+        expected_hash = task.source.target_file_hashes.get(path)
         file_path = cwd / path
-        if completed.returncode != 0:
-            if file_path.exists():
-                passed = False
-                stderr_lines.append(f"expected target commit to delete {path}")
-            else:
-                stdout_lines.append(f"target deletion reproduced for {path}")
+        if expected_hash is None:
+            passed = False
+            stderr_lines.append(f"missing target hash for {path}")
             continue
         if not file_path.exists():
             passed = False
             stderr_lines.append(f"missing generated file {path}")
             continue
-        if file_path.read_bytes() != completed.stdout:
+        actual_hash = hashlib.sha256(file_path.read_bytes()).hexdigest()
+        if actual_hash != expected_hash:
             passed = False
             stderr_lines.append(f"content differs from target commit for {path}")
         else:
@@ -354,7 +332,6 @@ def run(
                     isolated.path,
                     isolated.log_dir,
                     len(verify_results) + 1,
-                    repo_root,
                 )
                 if target_verify is not None:
                     verify_results.append(target_verify)

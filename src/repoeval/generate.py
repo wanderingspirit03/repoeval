@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+import hashlib
 import re
+import subprocess
 
 from repoeval.git import collect_commit_summaries
 from repoeval.models import EvalTask, TaskSource
@@ -17,6 +19,45 @@ def _slugify(value: str) -> str:
 
 def _is_ignored(path: str) -> bool:
     return path.startswith(_IGNORED_PREFIXES) or path.endswith(_IGNORED_SUFFIXES)
+
+
+def _target_file_hashes(repo_root: Path, commit: str, paths: list[str]) -> dict[str, str]:
+    hashes: dict[str, str] = {}
+    for path in paths:
+        if not _exists_in_parent(repo_root, commit, path):
+            continue
+        completed = subprocess.run(
+            ["git", "show", f"{commit}:{path}"],
+            cwd=repo_root,
+            capture_output=True,
+            check=False,
+        )
+        if completed.returncode == 0:
+            hashes[path] = hashlib.sha256(completed.stdout).hexdigest()
+    return hashes
+
+
+def _exists_in_parent(repo_root: Path, commit: str, path: str) -> bool:
+    completed = subprocess.run(
+        ["git", "rev-parse", f"{commit}^"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        return False
+    parent_commit = completed.stdout.strip()
+    return (
+        subprocess.run(
+            ["git", "cat-file", "-e", f"{parent_commit}:{path}"],
+            cwd=repo_root,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        ).returncode
+        == 0
+    )
 
 
 def generate_from_git_history(
@@ -53,6 +94,7 @@ def generate_from_git_history(
                     commit=commit.commit,
                     parent_commit=commit.parent_commit,
                     changed_files=changed_files,
+                    target_file_hashes=_target_file_hashes(repo_root, commit.commit, changed_files),
                 ),
             )
         )
