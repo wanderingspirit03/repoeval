@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
+import yaml
 from typer.testing import CliRunner
 
 from repoeval.cli import app
@@ -51,8 +53,48 @@ def test_mock_runner_workflow_end_to_end(tmp_path: Path, monkeypatch) -> None:  
     results_path = tmp_path / ".repoeval" / "results.jsonl"
     assert results_path.exists()
     assert results_path.read_text(encoding="utf-8").count("\n") == 1
+    rec = json.loads(results_path.read_text(encoding="utf-8"))
+    assert rec["status"] == "passed"
+    assert rec["diff"]["files_touched"] == ["src/example.py"]
 
     report_result = runner.invoke(app, ["report"])
     assert report_result.exit_code == 0, report_result.output
     assert (tmp_path / ".repoeval" / "report.md").exists()
     assert (tmp_path / ".repoeval" / "routing.yaml").exists()
+
+
+def test_git_history_modified_file_requires_recreating_target_content(
+    tmp_path: Path, monkeypatch
+) -> None:  # noqa: ANN001
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "repoeval@example.invalid"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "RepoEval Test"], cwd=tmp_path, check=True)
+    commit_file(tmp_path, "src/example.py", "def value():\n    return 1\n", "Initial implementation")
+    commit_file(
+        tmp_path,
+        "src/example.py",
+        "def value():\n    return 1\n\n\ndef added():\n    return 2\n",
+        "Add helper",
+    )
+
+    runner = CliRunner()
+    monkeypatch.chdir(tmp_path)
+
+    init_result = runner.invoke(app, ["init", "--force"])
+    assert init_result.exit_code == 0, init_result.output
+    generate_result = runner.invoke(app, ["generate", "--from-git-history", "--limit", "1"])
+    assert generate_result.exit_code == 0, generate_result.output
+
+    task = yaml.safe_load((tmp_path / ".repoeval" / "tasks.yaml").read_text(encoding="utf-8"))["tasks"][0]
+    assert task["source"]["changed_files"] == ["src/example.py"]
+
+    results_path = tmp_path / ".repoeval" / "results.jsonl"
+    results_path.write_text("", encoding="utf-8")
+    run_result = runner.invoke(app, ["run", "--agents", "mock", "--tasks", ".repoeval/tasks.yaml"])
+    assert run_result.exit_code == 0, run_result.output
+
+    rec = json.loads(results_path.read_text(encoding="utf-8"))
+    assert rec["status"] == "failed"
+    assert rec["diff"]["files_touched"] == []
+    assert rec["diff"]["changed_lines"] == 0
+    assert rec["expected_files"] == [{"path": "src/example.py", "exists": True}]

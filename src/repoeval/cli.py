@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -196,6 +197,75 @@ def _run_verify_command(command: str, cwd: Path, log_dir: Path, index: int) -> V
     return VerifyResult(**result.model_dump(), passed=result.exit_code == 0)
 
 
+def _git_history_target_verify(task: EvalTask, cwd: Path, log_dir: Path, index: int) -> VerifyResult | None:
+    if not task.source or task.source.type != "git-history" or not task.source.commit:
+        return None
+    changed_files = task.source.changed_files or task.expected_files
+    if not changed_files:
+        return None
+
+    paths_to_compare = []
+    for path in changed_files:
+        existed_in_parent = (
+            task.source.parent_commit is not None
+            and subprocess.run(
+                ["git", "cat-file", "-e", f"{task.source.parent_commit}:{path}"],
+                cwd=cwd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            ).returncode
+            == 0
+        )
+        if existed_in_parent:
+            paths_to_compare.append(path)
+    if not paths_to_compare:
+        return None
+
+    started = time.monotonic()
+    stdout_path = log_dir / f"verify-{index}.out"
+    stderr_path = log_dir / f"verify-{index}.err"
+    stdout_lines: list[str] = []
+    stderr_lines: list[str] = []
+    passed = True
+
+    for path in paths_to_compare:
+        completed = subprocess.run(
+            ["git", "show", f"{task.source.commit}:{path}"],
+            cwd=cwd,
+            capture_output=True,
+            check=False,
+        )
+        file_path = cwd / path
+        if completed.returncode != 0:
+            if file_path.exists():
+                passed = False
+                stderr_lines.append(f"expected target commit to delete {path}")
+            else:
+                stdout_lines.append(f"target deletion reproduced for {path}")
+            continue
+        if not file_path.exists():
+            passed = False
+            stderr_lines.append(f"missing generated file {path}")
+            continue
+        if file_path.read_bytes() != completed.stdout:
+            passed = False
+            stderr_lines.append(f"content differs from target commit for {path}")
+        else:
+            stdout_lines.append(f"content matches target commit for {path}")
+
+    stdout_path.write_text("\n".join(stdout_lines), encoding="utf-8")
+    stderr_path.write_text("\n".join(stderr_lines), encoding="utf-8")
+    return VerifyResult(
+        command=f"git-history target content matches {task.source.commit}",
+        exit_code=0 if passed else 1,
+        runtime_seconds=time.monotonic() - started,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        passed=passed,
+    )
+
+
 def _error_runner_result(log_dir: Path, error: str) -> RunnerResult:
     stdout_path = log_dir / "runner.out"
     stderr_path = log_dir / "runner.err"
@@ -272,6 +342,11 @@ def run(
                     _run_verify_command(command, isolated.path, isolated.log_dir, idx)
                     for idx, command in enumerate(verify_commands, start=1)
                 ]
+                target_verify = _git_history_target_verify(
+                    task, isolated.path, isolated.log_dir, len(verify_results) + 1
+                )
+                if target_verify is not None:
+                    verify_results.append(target_verify)
                 expected_files = [
                     ExpectedFileResult(
                         path=expected_file, exists=(isolated.path / expected_file).exists()
